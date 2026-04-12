@@ -1,0 +1,87 @@
+ARG PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+
+################################################
+# Source
+################################################
+FROM node:20-slim AS source
+
+ARG VERSION=main
+ARG GITHUB_DOMAIN=github.com
+
+WORKDIR /app
+RUN set -eux; \
+    sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/debian.sources; \
+    apt-get update -o Acquire::Retries=5; \
+    apt-get install -y --fix-missing wget python3; \
+    wget https://${GITHUB_DOMAIN}/XiaoMi/xiaomi-miloco/archive/$VERSION.tar.gz -O- | tar zxvf - --strip 1 -C .; \
+    sed -i 's/enable_audio: bool = False,/enable_audio: bool = True,/' miot_kit/miot/camera.py; \
+    sed -i 's/= MIoTCameraVideoQuality.LOW,/= MIoTCameraVideoQuality.HIGH,/' miot_kit/miot/camera.py; \
+    python3 -c "from pathlib import Path; path = Path('miot_kit/miot/lan.py'); text = path.read_text(); text = text.replace('import asyncio\\nfrom dataclasses import dataclass\\n', 'import asyncio\\nfrom dataclasses import dataclass\\nimport os\\n'); text = text.replace('        self._callbacks_device_status_changed = {}\\n\\n        self._init_lock = asyncio.Lock()\\n', '        self._callbacks_device_status_changed = {}\\n        self._target_ips = [ip.strip() for ip in os.getenv(\\\"MIOT_LAN_TARGETS\\\", \\\"\\\").split(\\\",\\\") if ip.strip()]\\n\\n        self._init_lock = asyncio.Lock()\\n'); text = text.replace('            # Scan devices\\n            self.ping_internal()\\n', '            # Scan devices\\n            self.ping_internal()\\n            for target_ip in self._target_ips:\\n                self.ping_internal(target_ip=target_ip)\\n'); path.write_text(text)"; \
+    python3 -c "from pathlib import Path; path = Path('miloco_server/mcp/local_mcp_servers.py'); text = path.read_text(); text = text.replace('on_duplicate_tools=', 'on_duplicate='); path.write_text(text)"; \
+    python3 -c "from pathlib import Path; path = Path('miloco_server/proxy/miot_proxy.py'); text = path.read_text(); text = text.replace('            cameras = await self._miot_client.get_cameras_async()\\n', '            await self._miot_client.refresh_cameras_status_async()\\n            cameras = await self._miot_client.get_cameras_async()\\n'); path.write_text(text)"
+
+
+################################################
+# Frontend Builder
+################################################
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /app
+COPY --from=source /app/web_ui/ /app/
+RUN npm install
+RUN npm run build \
+    && node -e "const fs=require('fs'); const path=require('path'); const dir='/app/dist/assets/js'; const file=fs.readdirSync(dir).find(name=>/^index-.*\\.js$/.test(name)); if(!file) throw new Error('frontend bundle not found'); const full=path.join(dir,file); const old='P.jsx(\"div\",{className:vi.videoArea,children:P.jsx(\"canvas\",{ref:l,style:{borderRadius:\"8px\",objectFit:\"contain\",background:\"#000\"}})})'; const neu='P.jsx(\"div\",{className:vi.videoArea,children:P.jsx(\"canvas\",{ref:l,style:{width:\"100%\",height:\"100%\",borderRadius:\"8px\",objectFit:\"contain\",background:\"#000\"}})})'; const text=fs.readFileSync(full,'utf8'); if(!text.includes(old)) throw new Error('video modal canvas snippet not found'); fs.writeFileSync(full,text.replace(old,neu));"
+
+
+################################################
+# Backend Base
+################################################
+FROM python:3.12-slim AS backend-base
+
+ARG PIP_INDEX_URL
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+WORKDIR /app
+
+COPY --from=source /app/miloco_server/pyproject.toml /app/miloco_server/pyproject.toml
+COPY --from=source /app/miot_kit/pyproject.toml /app/miot_kit/pyproject.toml
+
+RUN pip config set global.index-url "${PIP_INDEX_URL}" \
+    && pip install --upgrade pip setuptools wheel \
+    && pip install --no-build-isolation /app/miloco_server \
+    && pip install --no-build-isolation /app/miot_kit \
+    && rm -rf /app/miloco_server \
+    && rm -rf /app/miot_kit
+
+
+################################################
+# Backend
+################################################
+FROM backend-base AS backend
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+WORKDIR /app
+
+COPY --from=source /app/miloco_server /app/miloco_server
+COPY --from=source /app/config/server_config.yaml /app/config/server_config.yaml
+COPY --from=source /app/config/prompt_config.yaml /app/config/prompt_config.yaml
+COPY --from=source /app/scripts/start_server.py /app/start_server.py
+COPY --from=source /app/miot_kit /app/miot_kit
+
+RUN pip install --no-build-isolation -e /app/miloco_server \
+    && pip install --no-build-isolation -e /app/miot_kit \
+    && rm -rf /app/miloco_server/static \
+    && rm -rf /app/miloco_server/.temp \
+    && rm -rf /app/miloco_server/.log
+
+COPY --from=frontend-builder /app/dist/ /app/miloco_server/static/
+
+ENV BACKEND_PORT=8000 \
+    BACKEND_LOG_LEVEL=warning
+
+CMD ["python3", "start_server.py"]

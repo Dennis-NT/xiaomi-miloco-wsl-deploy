@@ -1,0 +1,7 @@
+1. 把整个文件夹复制到新电脑，例如 `~/projects/<repo-name>`
+2. 先看 `docs/5分钟快速部署版.md`
+3. 需要完整说明时看 `docs/再次部署指南.md`
+4. 如果新电脑还没有 WSL 原生 Docker，在项目目录执行:
+   `bash ./setup-native-docker.sh`
+5. 本机 Windows 访问:
+   `https://localhost:8000`

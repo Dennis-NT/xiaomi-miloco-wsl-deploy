@@ -1,0 +1,15 @@
+.env*
+!.env.example
+
+__pycache__/
+*.pyc
+
+miloco/cert/
+miloco/log/
+miloco/miot_cache/
+miloco/*.db
+
+*.tar.gz
+*.sha256
+
+.DS_Store
