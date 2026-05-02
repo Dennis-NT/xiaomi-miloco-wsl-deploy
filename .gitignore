@@ -13,3 +13,4 @@ miloco/*.db
 *.sha256
 
 .DS_Store
+miloco/images/
