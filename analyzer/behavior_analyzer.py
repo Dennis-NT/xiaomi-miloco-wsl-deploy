@@ -1,0 +1,212 @@
+import logging
+import threading
+from pathlib import Path
+from typing import Optional
+
+import cv2
+import numpy as np
+
+from analyzer.config import Config
+from analyzer.pose_detector import PoseDetector
+from analyzer.hands_detector import HandsDetector
+from analyzer.roi import RoiConfig
+from analyzer.behavior_rules import BehaviorAccumulator
+from analyzer.scoring import ScoringEngine
+
+logger = logging.getLogger(__name__)
+
+
+def _brush_score(finger_tips, mouth):
+    """Higher score = finger closer to mouth."""
+    if not finger_tips or mouth is None:
+        return 0.0
+    import math
+    min_d = min(math.hypot(t[0] - mouth[0], t[1] - mouth[1]) for t in finger_tips)
+    return 1.0 / (min_d + 0.01)
+
+
+def _facewash_score(finger_tips, face, face_threshold=0.12):
+    """Higher score = more fingers near face."""
+    if not finger_tips or face is None:
+        return 0
+    import math
+    count = sum(1 for t in finger_tips if math.hypot(t[0] - face[0], t[1] - face[1]) < face_threshold)
+    return count
+
+
+class BehaviorAnalyzer:
+    def __init__(self, config: Config):
+        self.config = config
+
+        # Pose model
+        pose_model = f"pose_landmarker_{config.analysis_pose_model}.task"
+        pose_path = str(Path(__file__).resolve().parent / "models" / pose_model)
+        self.pose_detector = PoseDetector(model_path=pose_path)
+
+        # Hands model
+        hands_model = config.get("hands", "model", default="hand_landmarker.task")
+        hands_path = str(Path(__file__).resolve().parent / "models" / hands_model)
+        self.hands_detector = HandsDetector(model_path=hands_path)
+
+        self.roi = RoiConfig(config.get("roi"))
+        self.scoring = ScoringEngine(
+            toothbrush_min_done=config.analysis_threshold("toothbrush_min_seconds_done"),
+            toothbrush_min_medium=config.analysis_threshold("toothbrush_min_seconds_medium"),
+            toothbrush_min_good=config.analysis_threshold("toothbrush_min_seconds_good"),
+            facewash_min_done=config.analysis_threshold("facewash_min_seconds_done"),
+            facewash_min_medium=config.analysis_threshold("facewash_min_seconds_medium"),
+            facewash_min_good=config.analysis_threshold("facewash_min_seconds_good"),
+        )
+        self.accumulator = BehaviorAccumulator(
+            brush_finger_threshold=config.get("hands", "brush_finger_threshold", default=0.10),
+            brush_wrist_threshold=config.get("hands", "brush_wrist_threshold", default=0.15),
+            face_finger_threshold=config.get("hands", "face_finger_threshold", default=0.12),
+            face_wrist_threshold=config.get("hands", "face_wrist_threshold", default=0.18),
+            min_fingers_for_facewash=config.get("hands", "min_fingers_for_facewash", default=4),
+        )
+        self.frame_count = 0
+        self.pose_detection_count = 0
+        self.hands_detection_count = 0
+        self._lock = threading.Lock()
+
+        # Best frames tracking
+        self.best_brush_frame: Optional[np.ndarray] = None
+        self.best_brush_score = 0.0
+        self.best_facewash_frame: Optional[np.ndarray] = None
+        self.best_facewash_score = 0
+
+        logger.info(
+            "BehaviorAnalyzer initialized. Pose=%s, ROI=%s, Hands enabled",
+            config.analysis_pose_model,
+            self.roi.enabled,
+        )
+
+    def process_frame(self, frame_bgr: np.ndarray, relative_time: float):
+        """Process a single frame and update internal state. Thread-safe."""
+        with self._lock:
+            self.frame_count += 1
+
+            # 1. Pose detection
+            landmarks = self.pose_detector.detect(frame_bgr)
+            mouth = None
+            face = None
+            left_wrist = None
+            right_wrist = None
+
+            if landmarks is not None:
+                self.pose_detection_count += 1
+                mouth = self.pose_detector.get_mouth_center(landmarks)
+                face = self.pose_detector.get_face_center(landmarks)
+                left_wrist, right_wrist = self.pose_detector.get_wrists(landmarks)
+
+            # 2. Hands detection
+            finger_tips = None
+            hand_landmarks = self.hands_detector.detect(frame_bgr)
+            if hand_landmarks:
+                self.hands_detection_count += 1
+                finger_tips = self.hands_detector.get_all_finger_tips(hand_landmarks)
+
+            # 3. Update behavior rules
+            self.accumulator.update(
+                relative_time,
+                mouth,
+                face,
+                left_wrist,
+                right_wrist,
+                finger_tips=finger_tips,
+            )
+
+            # 4. Track best evidence frames
+            # Use finger tips if available, otherwise fall back to wrists
+            if mouth is not None:
+                if finger_tips:
+                    b_score = _brush_score(finger_tips, mouth)
+                elif left_wrist is not None or right_wrist is not None:
+                    # Fallback: use wrist distance as score
+                    import math
+                    d_left = math.hypot(left_wrist[0] - mouth[0], left_wrist[1] - mouth[1]) if left_wrist else float('inf')
+                    d_right = math.hypot(right_wrist[0] - mouth[0], right_wrist[1] - mouth[1]) if right_wrist else float('inf')
+                    b_score = 1.0 / (min(d_left, d_right) + 0.01)
+                else:
+                    b_score = 0.0
+
+                if b_score > self.best_brush_score:
+                    self.best_brush_score = b_score
+                    self.best_brush_frame = frame_bgr.copy()
+
+            if face is not None:
+                if finger_tips:
+                    fw_score = _facewash_score(finger_tips, face)
+                elif left_wrist is not None and right_wrist is not None:
+                    # Fallback: both wrists near face
+                    import math
+                    d_left = math.hypot(left_wrist[0] - face[0], left_wrist[1] - face[1])
+                    d_right = math.hypot(right_wrist[0] - face[0], right_wrist[1] - face[1])
+                    fw_score = int(d_left < 0.18 and d_right < 0.18)
+                else:
+                    fw_score = 0
+
+                if fw_score > self.best_facewash_score:
+                    self.best_facewash_score = fw_score
+                    self.best_facewash_frame = frame_bgr.copy()
+
+    def save_evidence_frames(self, tag: str, frames_dir: str) -> dict:
+        """Save best frames to disk. Returns paths."""
+        paths = {}
+        out_dir = Path(frames_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.best_brush_frame is not None:
+            path = out_dir / f"{tag}_best_brush.jpg"
+            cv2.imwrite(str(path), self.best_brush_frame)
+            paths["brush"] = str(path)
+            logger.info("Saved best brush frame: %s", path)
+
+        if self.best_facewash_frame is not None:
+            path = out_dir / f"{tag}_best_facewash.jpg"
+            cv2.imwrite(str(path), self.best_facewash_frame)
+            paths["facewash"] = str(path)
+            logger.info("Saved best facewash frame: %s", path)
+
+        # Fallback: if no action detected, save a generic frame from processing
+        if not paths and self.frame_count > 0:
+            logger.info("No best frames to save")
+
+        return paths
+
+    def get_result(self, end_time: float) -> dict:
+        """Finalize and return scoring result."""
+        with self._lock:
+            self.accumulator.finalize(end_time)
+
+            tb_seconds = self.accumulator.total_brush_seconds()
+            fw_seconds = self.accumulator.total_facewash_seconds()
+            tb_cont = self.accumulator.brush_continuity_ratio()
+            fw_cont = self.accumulator.facewash_continuity_ratio()
+
+            # Phase 2 MVP: rinse detection is placeholder (always False)
+            rinse = False
+
+            tb_grade = self.scoring.score_toothbrush(tb_seconds, tb_cont, rinse)
+            fw_grade = self.scoring.score_facewash(fw_seconds, fw_cont)
+            summary = self.scoring.generate_summary(
+                tb_grade, fw_grade, tb_seconds, fw_seconds, rinse
+            )
+
+            return {
+                "toothbrush_grade": tb_grade,
+                "facewash_grade": fw_grade,
+                "toothbrush_seconds": int(tb_seconds),
+                "facewash_seconds": int(fw_seconds),
+                "rinse_detected": rinse,
+                "summary_text": summary,
+                "frame_count": self.frame_count,
+                "pose_detection_count": self.pose_detection_count,
+                "hands_detection_count": self.hands_detection_count,
+                "brush_segments": self.accumulator.brush_segments,
+                "facewash_segments": self.accumulator.facewash_segments,
+            }
+
+    def close(self):
+        self.pose_detector.close()
+        self.hands_detector.close()

@@ -60,3 +60,28 @@ services:
       <<: *micam_envs
       CAMERA_ID: ${CAMERA_2_ID}
       RTSP_URL: ${CAMERA_2_RTSP_URL}
+
+  analyzer:
+    container_name: analyzer
+    build:
+      context: .
+      dockerfile: Dockerfile.analyzer
+    image: micam-wsl-analyzer:local
+    depends_on:
+      - go2rtc
+      - micam1
+    network_mode: host
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      RTSP_URL: ${RTSP_URL:-rtsp://127.0.0.1:8554/xiaomi_cam}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      EMAIL_TO: ${EMAIL_TO:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      TZ: ${TZ:-Asia/Shanghai}
+    restart: unless-stopped

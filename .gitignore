@@ -14,3 +14,9 @@ miloco/*.db
 
 .DS_Store
 miloco/images/
+analyzer/models/*.task
+
+
+# Runtime data
+data/
+

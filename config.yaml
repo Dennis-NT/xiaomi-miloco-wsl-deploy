@@ -1,0 +1,60 @@
+timezone: Asia/Shanghai
+
+windows:
+  - name: morning
+    start: "06:30"
+    end: "07:30"
+  - name: evening
+    start: "21:30"
+    end: "22:30"
+
+stream:
+  rtsp_url: "${RTSP_URL:-rtsp://127.0.0.1:8554/xiaomi_cam}"
+  reconnect_retries: 3
+
+analysis:
+  sample_fps: 2
+  # Pose model: lite / full / heavy (place .task file in analyzer/models/)
+  pose_model: "heavy"
+  # Thresholds for Phase 2
+  toothbrush_min_seconds_done: 20
+  toothbrush_min_seconds_medium: 45
+  toothbrush_min_seconds_good: 90
+  facewash_min_seconds_done: 8
+  facewash_min_seconds_medium: 15
+  facewash_min_seconds_good: 30
+
+hands:
+  model: "hand_landmarker.task"
+  # Finger-tip distance thresholds (more precise than wrist)
+  brush_finger_threshold: 0.10
+  brush_wrist_threshold: 0.15
+  face_finger_threshold: 0.12
+  face_wrist_threshold: 0.18
+  min_fingers_for_facewash: 4
+
+roi:
+  enabled: false
+  # Normalized coordinates [x1, y1, x2, y2] in 0..1 range
+  # Set after running scripts/capture_reference_frame.py and measuring
+  sink_area: [0.0, 0.0, 1.0, 1.0]
+  mirror_area: null
+  body_area: null
+
+storage:
+  frames_dir: "./data/frames"
+  clips_dir: "./data/clips"
+  db_path: "./data/db/app.db"
+  retention_days_frames: 7
+  retention_days_clips: 7
+  retention_days_logs: 90
+
+email:
+  enabled: true
+  smtp_host: "${SMTP_HOST}"
+  smtp_port: ${SMTP_PORT:-587}
+  smtp_user: "${SMTP_USER}"
+  smtp_password: "${SMTP_PASSWORD}"
+  from_addr: "${EMAIL_FROM}"
+  to_addr: "${EMAIL_TO}"
+  use_tls: ${SMTP_USE_TLS:-true}
