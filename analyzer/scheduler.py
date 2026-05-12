@@ -82,6 +82,15 @@ class Scheduler:
     async def _run_window(self, window: AnalysisWindow):
         now_str = self._now().strftime("%Y-%m-%d")
         start_dt = self._now()
+
+        if self.db.has_result_for_window(now_str, window.name):
+            logger.info(
+                "Window %s already has a result for %s, skipping duplicate run",
+                window.name,
+                now_str,
+            )
+            return
+
         logger.info("Starting analysis window: %s (%s–%s)", window.name, window.start, window.end)
 
         # 1. Check stream availability

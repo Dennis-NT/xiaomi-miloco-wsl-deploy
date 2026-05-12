@@ -91,6 +91,19 @@ class Database:
             conn.commit()
             return cursor.lastrowid
 
+    def has_result_for_window(self, date: str, window: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM analysis_results
+                WHERE date = ? AND window = ?
+                LIMIT 1
+                """,
+                (date, window),
+            ).fetchone()
+            return row is not None
+
     def insert_event(self, event_type: str, message: str, level: str = "info"):
         now = datetime.now().isoformat()
         with self._conn() as conn:

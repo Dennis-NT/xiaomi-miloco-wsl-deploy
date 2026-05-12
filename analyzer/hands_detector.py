@@ -54,16 +54,27 @@ class HandsDetector:
 
     def get_all_finger_tips(self, hand_landmarks: List[List]) -> List[Tuple[float, float]]:
         """Return all visible finger tip coordinates [(x, y), ...]."""
-        tips = []
+        return [tip for group in self.get_finger_tip_groups(hand_landmarks) for tip in group]
+
+    def get_finger_tip_groups(self, hand_landmarks: List[List]) -> List[List[Tuple[float, float]]]:
+        """Return visible finger tips grouped by detected hand."""
+        groups = []
         for hand in hand_landmarks:
-            for idx in TIP_INDICES:
-                if idx < len(hand):
-                    lm = hand[idx]
-                    # hand landmarks don't have visibility field in MediaPipe 0.10
-                    # use presence score if available, otherwise assume visible
-                    score = getattr(lm, 'presence', None)
-                    if score is None or score >= 0.5:
-                        tips.append((lm.x, lm.y))
+            tips = self._tips_for_hand(hand)
+            if tips:
+                groups.append(tips)
+        return groups
+
+    def _tips_for_hand(self, hand: List) -> List[Tuple[float, float]]:
+        tips = []
+        for idx in TIP_INDICES:
+            if idx < len(hand):
+                lm = hand[idx]
+                # hand landmarks don't have visibility field in MediaPipe 0.10
+                # use presence score if available, otherwise assume visible
+                score = getattr(lm, 'presence', None)
+                if score is None or score >= 0.5:
+                    tips.append((lm.x, lm.y))
         return tips
 
     def close(self):

@@ -6,6 +6,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.miloco
+      network: host
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-}
     image: micam-wsl-miloco:local
     network_mode: host
     environment:
@@ -39,6 +44,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-}
     image: micam-wsl-micam:local
     depends_on: [miloco, go2rtc]
     network_mode: host
@@ -66,6 +76,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.analyzer
+      network: host
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-}
     image: micam-wsl-analyzer:local
     depends_on:
       - go2rtc

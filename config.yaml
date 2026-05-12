@@ -23,6 +23,8 @@ analysis:
   facewash_min_seconds_done: 8
   facewash_min_seconds_medium: 15
   facewash_min_seconds_good: 30
+  # Ignore short one-off detections caused by drinking, walking, or touching face.
+  min_segment_seconds: 2.0
 
 hands:
   model: "hand_landmarker.task"

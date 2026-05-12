@@ -63,6 +63,7 @@ class BehaviorAnalyzer:
             face_finger_threshold=config.get("hands", "face_finger_threshold", default=0.12),
             face_wrist_threshold=config.get("hands", "face_wrist_threshold", default=0.18),
             min_fingers_for_facewash=config.get("hands", "min_fingers_for_facewash", default=4),
+            min_segment_seconds=config.get("analysis", "min_segment_seconds", default=2.0),
         )
         self.frame_count = 0
         self.pose_detection_count = 0
@@ -94,31 +95,40 @@ class BehaviorAnalyzer:
             right_wrist = None
 
             if landmarks is not None:
+                # Filter out false positives (e.g. empty scene detected as person)
+                if not self.pose_detector.is_valid_pose(landmarks):
+                    return
+
                 self.pose_detection_count += 1
                 mouth = self.pose_detector.get_mouth_center(landmarks)
                 face = self.pose_detector.get_face_center(landmarks)
                 left_wrist, right_wrist = self.pose_detector.get_wrists(landmarks)
+                if self.roi.enabled and not self._pose_in_roi(mouth, face, left_wrist, right_wrist):
+                    return
 
             # 2. Hands detection
             finger_tips = None
+            hand_tip_groups = None
             hand_landmarks = self.hands_detector.detect(frame_bgr)
             if hand_landmarks:
                 self.hands_detection_count += 1
-                finger_tips = self.hands_detector.get_all_finger_tips(hand_landmarks)
+                hand_tip_groups = self.hands_detector.get_finger_tip_groups(hand_landmarks)
+                finger_tips = [tip for group in hand_tip_groups for tip in group]
 
             # 3. Update behavior rules
-            self.accumulator.update(
+            is_brushing, is_facewashing = self.accumulator.update(
                 relative_time,
                 mouth,
                 face,
                 left_wrist,
                 right_wrist,
                 finger_tips=finger_tips,
+                hand_tip_groups=hand_tip_groups,
             )
 
             # 4. Track best evidence frames
-            # Use finger tips if available, otherwise fall back to wrists
-            if mouth is not None:
+            # Use only frames that actually triggered an action.
+            if is_brushing and mouth is not None:
                 if finger_tips:
                     b_score = _brush_score(finger_tips, mouth)
                 elif left_wrist is not None or right_wrist is not None:
@@ -134,7 +144,7 @@ class BehaviorAnalyzer:
                     self.best_brush_score = b_score
                     self.best_brush_frame = frame_bgr.copy()
 
-            if face is not None:
+            if is_facewashing and face is not None:
                 if finger_tips:
                     fw_score = _facewash_score(finger_tips, face)
                 elif left_wrist is not None and right_wrist is not None:
@@ -149,6 +159,9 @@ class BehaviorAnalyzer:
                 if fw_score > self.best_facewash_score:
                     self.best_facewash_score = fw_score
                     self.best_facewash_frame = frame_bgr.copy()
+
+    def _pose_in_roi(self, *points) -> bool:
+        return any(point is not None and self.roi.is_in_roi(point[0], point[1]) for point in points)
 
     def save_evidence_frames(self, tag: str, frames_dir: str) -> dict:
         """Save best frames to disk. Returns paths."""

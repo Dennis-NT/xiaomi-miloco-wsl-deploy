@@ -43,13 +43,17 @@ class StreamReader:
             self.cap.release()
             self.cap = None
 
-    async def is_available(self) -> bool:
-        """Quickly check if stream is accessible."""
+    def _check_available(self) -> bool:
+        """Synchronous check."""
         cap = cv2.VideoCapture(self.rtsp_url)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         available = cap.isOpened()
         cap.release()
         return available
+
+    async def is_available(self) -> bool:
+        """Quickly check if stream is accessible."""
+        return await asyncio.to_thread(self._check_available)
 
     async def collect(
         self,

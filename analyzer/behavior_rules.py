@@ -23,6 +23,16 @@ def count_nearby(points: List[Tuple[float, float]], target: Optional[Tuple[float
     return sum(1 for p in points if distance(p, target) < threshold)
 
 
+def count_nearby_by_group(
+    point_groups: List[List[Tuple[float, float]]],
+    target: Optional[Tuple[float, float]],
+    threshold: float,
+) -> List[int]:
+    if not point_groups or target is None:
+        return []
+    return [count_nearby(points, target, threshold) for points in point_groups]
+
+
 class BehaviorState:
     IDLE = "idle"
     BRUSHING = "brushing"
@@ -42,6 +52,7 @@ class BehaviorAccumulator:
         face_wrist_threshold: float = 0.18,
         min_fingers_for_facewash: int = 4,
         break_seconds: float = 2.0,
+        min_segment_seconds: float = 2.0,
     ):
         # Distance thresholds in normalized coordinates (0..1)
         self.brush_finger_threshold = brush_finger_threshold
@@ -50,16 +61,18 @@ class BehaviorAccumulator:
         self.face_wrist_threshold = face_wrist_threshold
         self.min_fingers_for_facewash = min_fingers_for_facewash
         self.break_seconds = break_seconds
+        self.min_segment_seconds = min_segment_seconds
 
         self.state = BehaviorState.IDLE
         self.state_start_time: float = 0.0
-        self.last_detection_time: float = 0.0
 
         self.brush_segments: list[Tuple[float, float]] = []  # list of (start, end)
         self.facewash_segments: list[Tuple[float, float]] = []
 
         self.current_brush_start: Optional[float] = None
         self.current_facewash_start: Optional[float] = None
+        self.last_brush_seen: Optional[float] = None
+        self.last_facewash_seen: Optional[float] = None
 
     def update(
         self,
@@ -69,18 +82,22 @@ class BehaviorAccumulator:
         left_wrist: Optional[Tuple[float, float]],
         right_wrist: Optional[Tuple[float, float]],
         finger_tips: Optional[List[Tuple[float, float]]] = None,
-    ):
+        hand_tip_groups: Optional[List[List[Tuple[float, float]]]] = None,
+    ) -> tuple[bool, bool]:
         """
         relative_time: seconds since window start.
         finger_tips: list of (x, y) for all detected finger tips.
         """
         finger_tips = finger_tips or []
+        hand_tip_groups = hand_tip_groups or []
 
         # Determine instantaneous actions
-        is_brushing = self._detect_brushing(mouth, left_wrist, right_wrist, finger_tips)
-        is_facewashing = self._detect_facewashing(face, left_wrist, right_wrist, finger_tips)
+        is_facewashing = self._detect_facewashing(face, left_wrist, right_wrist, finger_tips, hand_tip_groups)
+        # Washing the face also puts fingers near the mouth, so give it priority.
+        is_brushing = False if is_facewashing else self._detect_brushing(mouth, left_wrist, right_wrist, finger_tips)
 
         self._update_state(relative_time, is_brushing, is_facewashing)
+        return is_brushing, is_facewashing
 
     def _detect_brushing(
         self,
@@ -97,8 +114,9 @@ class BehaviorAccumulator:
             d_tip = min_distance(finger_tips, mouth)
             if d_tip < self.brush_finger_threshold:
                 return True
+            return False
 
-        # Fallback: wrists near mouth
+        # Fallback when hands are not detected: wrists near mouth.
         d_left = distance(left_wrist, mouth)
         d_right = distance(right_wrist, mouth)
         if d_left < self.brush_wrist_threshold or d_right < self.brush_wrist_threshold:
@@ -112,70 +130,96 @@ class BehaviorAccumulator:
         left_wrist: Optional[Tuple[float, float]],
         right_wrist: Optional[Tuple[float, float]],
         finger_tips: List[Tuple[float, float]],
+        hand_tip_groups: List[List[Tuple[float, float]]],
     ) -> bool:
         if face is None:
             return False
 
-        # Primary: multiple finger tips near face (both hands scrubbing)
-        if finger_tips:
-            nearby_count = count_nearby(finger_tips, face, self.face_finger_threshold)
-            if nearby_count >= self.min_fingers_for_facewash:
-                return True
-            # Also accept if at least 2 tips are very close (one hand actively washing)
-            very_close = count_nearby(finger_tips, face, self.face_finger_threshold * 0.7)
-            if very_close >= 2:
+        # Primary: both hands near face. This avoids treating one hand near
+        # the mouth (brushing, drinking, touching the face) as face washing.
+        if hand_tip_groups:
+            nearby_by_hand = count_nearby_by_group(hand_tip_groups, face, self.face_finger_threshold)
+            active_hands = sum(1 for count in nearby_by_hand if count >= 2)
+            if active_hands >= 2:
                 return True
 
-        # Fallback: both wrists near face
+        # Fallback when only flattened tips are available.
+        if finger_tips:
+            nearby_count = count_nearby(finger_tips, face, self.face_finger_threshold)
+            if nearby_count >= max(self.min_fingers_for_facewash + 2, 6):
+                return True
+
+        # Last fallback: both wrists near face. A single wrist is too noisy.
         d_left = distance(left_wrist, face)
         d_right = distance(right_wrist, face)
         if d_left < self.face_wrist_threshold and d_right < self.face_wrist_threshold:
-            return True
-        elif d_left < self.face_wrist_threshold * 0.6 or d_right < self.face_wrist_threshold * 0.6:
             return True
 
         return False
 
     def _update_state(self, t: float, is_brushing: bool, is_facewashing: bool):
-        # Hysteresis: require break_seconds of absence to end a segment
-        gap = t - self.last_detection_time
-        self.last_detection_time = t
-
-        if gap > self.break_seconds:
-            # Force end any ongoing segment due to long gap
-            if self.current_brush_start is not None:
-                self.brush_segments.append((self.current_brush_start, self.last_detection_time - gap))
-                self.current_brush_start = None
-            if self.current_facewash_start is not None:
-                self.facewash_segments.append((self.current_facewash_start, self.last_detection_time - gap))
-                self.current_facewash_start = None
-
-        # Update brushing
         if is_brushing:
             if self.current_brush_start is None:
                 self.current_brush_start = t
+            self.last_brush_seen = t
         else:
-            if self.current_brush_start is not None and gap > self.break_seconds:
-                self.brush_segments.append((self.current_brush_start, self.last_detection_time - gap))
-                self.current_brush_start = None
+            self._close_if_stale(
+                t,
+                "brush",
+                self.current_brush_start,
+                self.last_brush_seen,
+                self.brush_segments,
+            )
 
-        # Update face washing
         if is_facewashing:
             if self.current_facewash_start is None:
                 self.current_facewash_start = t
+            self.last_facewash_seen = t
         else:
-            if self.current_facewash_start is not None and gap > self.break_seconds:
-                self.facewash_segments.append((self.current_facewash_start, self.last_detection_time - gap))
-                self.current_facewash_start = None
+            self._close_if_stale(
+                t,
+                "facewash",
+                self.current_facewash_start,
+                self.last_facewash_seen,
+                self.facewash_segments,
+            )
+
+    def _close_if_stale(
+        self,
+        t: float,
+        behavior: str,
+        start: Optional[float],
+        last_seen: Optional[float],
+        segments: list[Tuple[float, float]],
+    ):
+        if start is None or last_seen is None or t - last_seen <= self.break_seconds:
+            return
+        self._append_segment(segments, start, last_seen)
+        if behavior == "brush":
+            self.current_brush_start = None
+            self.last_brush_seen = None
+        else:
+            self.current_facewash_start = None
+            self.last_facewash_seen = None
+
+    def _append_segment(self, segments: list[Tuple[float, float]], start: float, end: float):
+        if end - start >= self.min_segment_seconds:
+            segments.append((start, end))
 
     def finalize(self, end_time: float):
         """Call at window end to close any open segments."""
-        if self.current_brush_start is not None:
-            self.brush_segments.append((self.current_brush_start, end_time))
+        if self.current_brush_start is not None and self.last_brush_seen is not None:
+            self._append_segment(self.brush_segments, self.current_brush_start, min(self.last_brush_seen, end_time))
             self.current_brush_start = None
-        if self.current_facewash_start is not None:
-            self.facewash_segments.append((self.current_facewash_start, end_time))
+            self.last_brush_seen = None
+        if self.current_facewash_start is not None and self.last_facewash_seen is not None:
+            self._append_segment(
+                self.facewash_segments,
+                self.current_facewash_start,
+                min(self.last_facewash_seen, end_time),
+            )
             self.current_facewash_start = None
+            self.last_facewash_seen = None
 
     def total_brush_seconds(self) -> float:
         return sum(end - start for start, end in self.brush_segments)

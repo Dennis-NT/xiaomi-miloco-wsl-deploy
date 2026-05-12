@@ -1,11 +1,17 @@
-FROM python:3.13-slim
+FROM micam-wsl-micam:local
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    # Force CPU-only mode for MediaPipe to avoid EGL issues in headless container
-    MESA_GL_VERSION_OVERRIDE=3.3
+    MESA_GL_VERSION_OVERRIDE=3.3 \
+    HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY}
 
-# Install system dependencies for OpenCV and MediaPipe
+# Install additional system deps for MediaPipe and OpenCV
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
@@ -13,13 +19,17 @@ RUN apt-get update \
         libxext6 \
         libxrender-dev \
         libgomp1 \
-        libgl1-mesa-glx \
+        libgl1 \
+        libegl1 \
+        libgles2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN python -m pip install -r requirements.txt
+COPY pip-packages /pip-packages
+RUN python -m pip install --no-index --find-links=/pip-packages -r requirements.txt \
+    && rm -rf /pip-packages
 
 COPY . .
 

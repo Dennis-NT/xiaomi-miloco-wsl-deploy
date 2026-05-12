@@ -102,6 +102,47 @@ class PoseDetector:
         right = (rw.x, rw.y) if rw.visibility >= 0.5 else None
         return left, right
 
+    def is_valid_pose(self, landmarks: list, min_visible: int = 20) -> bool:
+        """
+        Check if detected landmarks represent a real person.
+        Requires sufficient visible keypoints, core face, upper body landmarks,
+        and reasonable spatial distribution (to filter out hallucinations).
+        """
+        if not landmarks or len(landmarks) < 33:
+            return False
+
+        visible_count = sum(1 for lm in landmarks if lm.visibility >= 0.5)
+        if visible_count < min_visible:
+            return False
+
+        # Core face landmarks must be visible
+        face_indices = [NOSE, MOUTH_LEFT, MOUTH_RIGHT, LEFT_EYE, RIGHT_EYE, LEFT_EAR, RIGHT_EAR]
+        for idx in face_indices:
+            if landmarks[idx].visibility < 0.5:
+                return False
+
+        # Upper body landmarks must be visible
+        body_indices = [LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_WRIST, RIGHT_WRIST]
+        visible_body = sum(1 for idx in body_indices if landmarks[idx].visibility >= 0.5)
+        if visible_body < 4:
+            return False
+
+        # Spatial distribution check: real person occupies significant area
+        visible_points = [(lm.x, lm.y) for lm in landmarks if lm.visibility >= 0.5]
+        if len(visible_points) < 10:
+            return False
+
+        xs = [p[0] for p in visible_points]
+        ys = [p[1] for p in visible_points]
+        width = max(xs) - min(xs)
+        height = max(ys) - min(ys)
+
+        # A real standing person should be at least 10% frame width and 20% frame height
+        if width < 0.10 or height < 0.20:
+            return False
+
+        return True
+
     def close(self):
         try:
             self.detector.close()
