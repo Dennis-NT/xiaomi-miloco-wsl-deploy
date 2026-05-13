@@ -64,6 +64,9 @@ class BehaviorAnalyzer:
             face_wrist_threshold=config.get("hands", "face_wrist_threshold", default=0.18),
             min_fingers_for_facewash=config.get("hands", "min_fingers_for_facewash", default=4),
             min_segment_seconds=config.get("analysis", "min_segment_seconds", default=2.0),
+            min_segment_hits=config.get("analysis", "min_segment_hits", default=6),
+            brush_min_motion=config.get("analysis", "brush_min_motion", default=0.020),
+            facewash_min_motion=config.get("analysis", "facewash_min_motion", default=0.025),
         )
         self.frame_count = 0
         self.pose_detection_count = 0
@@ -75,6 +78,10 @@ class BehaviorAnalyzer:
         self.best_brush_score = 0.0
         self.best_facewash_frame: Optional[np.ndarray] = None
         self.best_facewash_score = 0
+        self.brush_frame_candidates: list[tuple[float, float, np.ndarray]] = []
+        self.facewash_frame_candidates: list[tuple[float, float, np.ndarray]] = []
+        self.accepted_brush_segments: list[tuple[float, float]] = []
+        self.accepted_facewash_segments: list[tuple[float, float]] = []
 
         logger.info(
             "BehaviorAnalyzer initialized. Pose=%s, ROI=%s, Hands enabled",
@@ -103,7 +110,10 @@ class BehaviorAnalyzer:
                 mouth = self.pose_detector.get_mouth_center(landmarks)
                 face = self.pose_detector.get_face_center(landmarks)
                 left_wrist, right_wrist = self.pose_detector.get_wrists(landmarks)
-                if self.roi.enabled and not self._pose_in_roi(mouth, face, left_wrist, right_wrist):
+                if self.roi.enabled:
+                    mouth = mouth if mouth is not None and self.roi.is_in_roi(mouth[0], mouth[1]) else None
+                    face = face if face is not None and self.roi.is_in_roi(face[0], face[1]) else None
+                if self.roi.enabled and mouth is None and face is None:
                     return
 
             # 2. Hands detection
@@ -143,6 +153,7 @@ class BehaviorAnalyzer:
                 if b_score > self.best_brush_score:
                     self.best_brush_score = b_score
                     self.best_brush_frame = frame_bgr.copy()
+                self._remember_candidate(self.brush_frame_candidates, b_score, relative_time, frame_bgr)
 
             if is_facewashing and face is not None:
                 if finger_tips:
@@ -159,9 +170,32 @@ class BehaviorAnalyzer:
                 if fw_score > self.best_facewash_score:
                     self.best_facewash_score = fw_score
                     self.best_facewash_frame = frame_bgr.copy()
+                self._remember_candidate(self.facewash_frame_candidates, float(fw_score), relative_time, frame_bgr)
 
     def _pose_in_roi(self, *points) -> bool:
         return any(point is not None and self.roi.is_in_roi(point[0], point[1]) for point in points)
+
+    def _remember_candidate(
+        self,
+        candidates: list[tuple[float, float, np.ndarray]],
+        score: float,
+        relative_time: float,
+        frame_bgr: np.ndarray,
+        limit: int = 20,
+    ):
+        candidates.append((score, relative_time, frame_bgr.copy()))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        del candidates[limit:]
+
+    def _best_candidate_in_segments(
+        self,
+        candidates: list[tuple[float, float, np.ndarray]],
+        segments: list[tuple[float, float]],
+    ) -> Optional[np.ndarray]:
+        for _, t, frame in candidates:
+            if any(start <= t <= end for start, end in segments):
+                return frame
+        return None
 
     def save_evidence_frames(self, tag: str, frames_dir: str) -> dict:
         """Save best frames to disk. Returns paths."""
@@ -169,15 +203,18 @@ class BehaviorAnalyzer:
         out_dir = Path(frames_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.best_brush_frame is not None:
+        brush_frame = self._best_candidate_in_segments(self.brush_frame_candidates, self.accepted_brush_segments)
+        facewash_frame = self._best_candidate_in_segments(self.facewash_frame_candidates, self.accepted_facewash_segments)
+
+        if brush_frame is not None:
             path = out_dir / f"{tag}_best_brush.jpg"
-            cv2.imwrite(str(path), self.best_brush_frame)
+            cv2.imwrite(str(path), brush_frame)
             paths["brush"] = str(path)
             logger.info("Saved best brush frame: %s", path)
 
-        if self.best_facewash_frame is not None:
+        if facewash_frame is not None:
             path = out_dir / f"{tag}_best_facewash.jpg"
-            cv2.imwrite(str(path), self.best_facewash_frame)
+            cv2.imwrite(str(path), facewash_frame)
             paths["facewash"] = str(path)
             logger.info("Saved best facewash frame: %s", path)
 
@@ -194,6 +231,8 @@ class BehaviorAnalyzer:
 
             tb_seconds = self.accumulator.total_brush_seconds()
             fw_seconds = self.accumulator.total_facewash_seconds()
+            self.accepted_brush_segments = list(self.accumulator.brush_segments)
+            self.accepted_facewash_segments = list(self.accumulator.facewash_segments)
             tb_cont = self.accumulator.brush_continuity_ratio()
             fw_cont = self.accumulator.facewash_continuity_ratio()
 
@@ -218,6 +257,8 @@ class BehaviorAnalyzer:
                 "hands_detection_count": self.hands_detection_count,
                 "brush_segments": self.accumulator.brush_segments,
                 "facewash_segments": self.accumulator.facewash_segments,
+                "rejected_brush_segments": self.accumulator.rejected_brush_segments,
+                "rejected_facewash_segments": self.accumulator.rejected_facewash_segments,
             }
 
     def close(self):

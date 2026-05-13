@@ -68,8 +68,8 @@ services:
     scale: 0 # Disabled by default, set 1 to enable
     environment:
       <<: *micam_envs
-      CAMERA_ID: ${CAMERA_2_ID}
-      RTSP_URL: ${CAMERA_2_RTSP_URL}
+      CAMERA_ID: ${CAMERA_2_ID:-}
+      RTSP_URL: ${CAMERA_2_RTSP_URL:-}
 
   analyzer:
     container_name: analyzer

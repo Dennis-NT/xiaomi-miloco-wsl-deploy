@@ -23,23 +23,27 @@ analysis:
   facewash_min_seconds_done: 8
   facewash_min_seconds_medium: 15
   facewash_min_seconds_good: 30
-  # Ignore short one-off detections caused by drinking, walking, or touching face.
-  min_segment_seconds: 2.0
+  # Ignore short/static detections caused by walking, drinking, or touching face.
+  min_segment_seconds: 5.0
+  min_segment_hits: 8
+  brush_min_motion: 0.020
+  facewash_min_motion: 0.025
 
 hands:
   model: "hand_landmarker.task"
   # Finger-tip distance thresholds (more precise than wrist)
-  brush_finger_threshold: 0.10
-  brush_wrist_threshold: 0.15
-  face_finger_threshold: 0.12
-  face_wrist_threshold: 0.18
+  brush_finger_threshold: 0.075
+  brush_wrist_threshold: 0.12
+  face_finger_threshold: 0.10
+  face_wrist_threshold: 0.15
   min_fingers_for_facewash: 4
 
 roi:
-  enabled: false
-  # Normalized coordinates [x1, y1, x2, y2] in 0..1 range
-  # Set after running scripts/capture_reference_frame.py and measuring
-  sink_area: [0.0, 0.0, 1.0, 1.0]
+  enabled: true
+  # Normalized coordinates [x1, y1, x2, y2] in 0..1 range.
+  # First pass based on 2026-05-12/13 evidence frames: keep the right-side
+  # washstand/person area and exclude the center cabinet/chair area.
+  sink_area: [0.84, 0.04, 1.0, 0.92]
   mirror_area: null
   body_area: null
 
